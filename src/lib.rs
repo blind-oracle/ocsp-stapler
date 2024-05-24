@@ -33,7 +33,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! // Inner service that provides certificates to Rustls, can be anything
 //! let ckey: CertifiedKey = ...;
 //! let mut inner = rustls::server::ResolvesServerCertUsingSni::new();

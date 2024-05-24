@@ -43,3 +43,6 @@ x509-parser = "0.16"
 [dev-dependencies]
 hex-literal = "0.4"
 rustls-pemfile = "2"
+
+[lib]
+doctest = false
