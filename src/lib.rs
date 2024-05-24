@@ -33,9 +33,11 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! // Inner service that provides certificates to Rustls, can be anything
-//! let inner: Arc<dyn ResolvesCerverCert> = ...;
+//! let ckey: CertifiedKey = ...;
+//! let mut inner = rustls::server::ResolvesServerCertUsingSni::new();
+//! inner.add("crates.io", ckey).unwrap();
 //!
 //! let stapler = Arc::new(ocsp_stapler::Stapler::new(inner));
 //!

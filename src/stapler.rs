@@ -8,6 +8,10 @@ use std::{
 use anyhow::{anyhow, Context, Error};
 use arc_swap::ArcSwapOption;
 use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
+use prometheus::{
+    register_histogram_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry, Histogram, IntCounterVec, IntGaugeVec, Registry,
+};
 use rasn_ocsp::CertStatus;
 use rustls::{
     pki_types::CertificateDer,
@@ -42,6 +46,42 @@ struct Cert {
     ocsp_validity: Option<OcspValidity>,
 }
 
+struct Metrics {
+    requests_count: IntCounterVec,
+    refresh_duration: Histogram,
+    certificate_count: IntGaugeVec,
+}
+
+impl Metrics {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            requests_count: register_int_counter_vec_with_registry!(
+                format!("ocsp_requests_total"),
+                format!("Counts the number of OCSP requests"),
+                &["result"],
+                registry
+            )
+            .unwrap(),
+
+            refresh_duration: register_histogram_with_registry!(
+                format!("ocsp_refresh_duration"),
+                format!("Observes OCSP refresh duration"),
+                registry
+            )
+            .unwrap(),
+
+            certificate_count: register_int_gauge_vec_with_registry!(
+                format!("ocsp_certificate_count"),
+                format!("Current number of certificates in storage"),
+                &["status"],
+                registry
+            )
+            .unwrap(),
+        }
+    }
+}
+
+/// Implements OCSP certificate stapling
 pub struct Stapler {
     tx: mpsc::Sender<(Fingerprint, Arc<CertifiedKey>)>,
     storage: Arc<ArcSwapOption<Storage>>,
@@ -51,8 +91,22 @@ pub struct Stapler {
 }
 
 impl Stapler {
-    /// Creates a Stapler with a provided OCSP Client
-    pub fn new_with_client(inner: Arc<dyn ResolvesServerCert>, client: Client) -> Self {
+    /// Creates a Stapler with a default OCSP Client and no metrics
+    pub fn new(inner: Arc<dyn ResolvesServerCert>) -> Self {
+        Self::new_with_client_and_registry(inner, Client::new(), None)
+    }
+
+    /// Creates a Stapler with a default OCSP Client and Registry
+    pub fn new_with_registry(inner: Arc<dyn ResolvesServerCert>, registry: &Registry) -> Self {
+        Self::new_with_client_and_registry(inner, Client::new(), Some(registry))
+    }
+
+    /// Creates a Stapler with a provided OCSP Client and Registry
+    pub fn new_with_client_and_registry(
+        inner: Arc<dyn ResolvesServerCert>,
+        client: Client,
+        registry: Option<&Registry>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(1024);
         let storage = Arc::new(ArcSwapOption::empty());
         let tracker = TaskTracker::new();
@@ -63,6 +117,7 @@ impl Stapler {
             storage: BTreeMap::new(),
             rx,
             published: storage.clone(),
+            metrics: registry.map(Metrics::new),
         };
 
         // Spawn the background task
@@ -78,11 +133,6 @@ impl Stapler {
             tracker,
             token,
         }
-    }
-
-    /// Creates a Stapler with a default OCSP Client
-    pub fn new(inner: Arc<dyn ResolvesServerCert>) -> Self {
-        Self::new_with_client(inner, Client::new())
     }
 
     /// Tells the background worker to stop and waits until it does
@@ -144,6 +194,7 @@ struct StaplerActor {
     storage: Storage,
     rx: mpsc::Receiver<(Fingerprint, Arc<CertifiedKey>)>,
     published: Arc<ArcSwapOption<Storage>>,
+    metrics: Option<Metrics>,
 }
 
 impl StaplerActor {
@@ -158,6 +209,8 @@ impl StaplerActor {
         self.storage.retain(|_, v| v.cert_validity > now);
 
         let start = Instant::now();
+
+        let mut revoked = 0;
         for v in self.storage.values_mut() {
             if let Some(x) = &v.ocsp_validity {
                 // See if this OCSP response is still valid
@@ -177,9 +230,18 @@ impl StaplerActor {
             let issuer = v.ckey.cert[1].as_ref();
 
             // Query the OCSP responder
-            let resp = match self.client.query(cert, issuer).await {
+            let resp = self.client.query(cert, issuer).await;
+
+            self.metrics.as_ref().inspect(|x| {
+                x.requests_count
+                    .with_label_values(&[if resp.is_err() { "error" } else { "ok" }])
+                    .inc()
+            });
+
+            let resp = match resp {
                 Err(e) => {
                     warn!("OCSP-Stapler: unable to perform OCSP request: {e:#}");
+
                     continue;
                 }
 
@@ -188,6 +250,7 @@ impl StaplerActor {
 
             if let CertStatus::Revoked(x) = resp.cert_status {
                 warn!("OCSP-Stapler: certificate was revoked: {x:?}");
+                revoked += 1;
             }
 
             // Update the OCSP response on the key
@@ -202,6 +265,18 @@ impl StaplerActor {
         // Publish the updated storage version
         let new = Arc::new(self.storage.clone());
         self.published.store(Some(new));
+
+        if let Some(v) = &self.metrics {
+            v.certificate_count
+                .with_label_values(&["ok"])
+                .set(self.storage.len() as i64);
+
+            v.certificate_count
+                .with_label_values(&["revoked"])
+                .set(revoked);
+
+            v.refresh_duration.observe(start.elapsed().as_secs_f64());
+        }
 
         warn!(
             "OCSP-Stapler: certificates refreshed in {}ms",
