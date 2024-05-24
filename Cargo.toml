@@ -1,0 +1,45 @@
+[package]
+name = "ocsp-stapler"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "OCSP stapler & client with support for Rustls"
+authors = ["Igor Novgorodov <igor@novg.net>"]
+homepage = "https://github.com/blind-oracle/ocsp-stapler"
+repository = "https://github.com/blind-oracle/ocsp-stapler"
+keywords = ["ocsp", "stapling", "staple", "rustls", "client"]
+categories = [
+    "network-programming",
+    "cryptography",
+    "asynchronous",
+    "web-programming::http-server",
+]
+
+[dependencies]
+anyhow = "1.0"
+arc-swap = "1"
+bytes = "1.5"
+chrono = "0.4"
+http = "1.1"
+prometheus = "0.13"
+rasn = "0.15"
+rasn-ocsp = "0.15"
+rasn-pkix = "0.15"
+reqwest = { version = "0.12", default_features = false, features = [
+    "rustls-tls",
+    "rustls-tls-webpki-roots",
+    "http2",
+    "charset",
+    "macos-system-configuration",
+] }
+rustls = "0.23"
+sha1 = "0.10"
+tokio = { version = "1.36", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+tracing = "0.1"
+url = "2.5"
+x509-parser = "0.16"
+
+[dev-dependencies]
+hex-literal = "0.4"
+rustls-pemfile = "2"
