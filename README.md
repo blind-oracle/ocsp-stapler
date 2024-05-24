@@ -1,5 +1,9 @@
 # ocsp-stapler
 
+[![crates.io](https://img.shields.io/crates/v/ocsp-stapler.svg)](https://crates.io/crates/ocsp-stapler)
+[![Documentation](https://docs.rs/ocsp-stapler/badge.svg)](https://docs.rs/ocsp-stapler)
+[![MIT/Apache-2 licensed](https://img.shields.io/crates/l/ocsp-stapler.svg)](./LICENSE)
+
 OCSP stapler for Rustls.
 
 - Standalone `Client` that can be used separately

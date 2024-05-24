@@ -9,14 +9,15 @@
 //! `Client` is an OCSP client that you can use to do OCSP requests to OCSP responders of the Certificate Authorities.
 //!
 //! ## `Stapler`
-//! `Stapler` provides a Rustls-compatible API to attach (staple) OCSP responses to the certificates.
+//! `Stapler` uses `Client` internally and provides a Rustls-compatible API to attach (staple) OCSP responses to the certificates.
 //! It wraps whatever that implements Rustls' `ResolvesServerCert` trait and also implements the same trait.
 //!
 //! The workflow is the following:
 //! - `Stapler` receives a `ClientHello` from Rustls and forwards it to ther wrapped trait object to get the certificate chain
 //! - It calculates the SHA-1 fingerprint over the whole end-entity certificate and uses that to check if it has the same certificate
 //!   in the local storage
-//! - If not - it sends the certificate to the background worker for eventual processing & stapling
+//! - If not - it sends the certificate to the background worker for eventual processing & stapling.
+//!   Meanwhilte it returns to Rustls the original unstapled certificate
 //! - If found - it respondes with a stapled version of the certificate
 //!
 //! Background worker duties:
@@ -29,6 +30,24 @@
 //!
 //! Background worker is spawned by `Stapler::new()` using `tokio::spawn` so it must be executed in Tokio context.
 //! It runs indefinitely unless stopped with `Stapler.stop()`.
+//!
+//! # Example
+//!
+//! ```rust
+//! // Inner service that provides certificates to Rustls, can be anything
+//! let inner: Arc<dyn ResolvesCerverCert> = ...;
+//!
+//! let stapler = Arc::new(ocsp_stapler::Stapler::new(inner));
+//!
+//! let server_config = rustls::server::ServerConfig::builder()
+//!         .with_no_client_auth()
+//!         .with_cert_resolver(stapler.clone());
+//!
+//! // Then you can use server_config wherever applicable
+//!
+//! // Stop the background worker to clean up
+//! stapler.stop().await;
+//! ```
 
 pub mod client;
 pub mod stapler;

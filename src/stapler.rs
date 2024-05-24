@@ -214,12 +214,11 @@ impl StaplerActor {
         fp: Fingerprint,
         ckey: Arc<CertifiedKey>,
     ) -> Result<(), Error> {
-        #[allow(clippy::map_entry)]
         if self.storage.contains_key(&fp) {
             return Ok(());
         }
 
-        // Parse the DER-encoded cert
+        // Parse the DER-encoded certificate
         let cert = X509Certificate::from_der(ckey.end_entity_cert().unwrap())
             .context("unable to parse certificate as X.509")?
             .1;
