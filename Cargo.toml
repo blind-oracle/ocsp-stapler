@@ -15,12 +15,16 @@ categories = [
     "web-programming::http-server",
 ]
 
+readme = "README_CARGO.md"
+
 [dependencies]
 anyhow = "1.0"
 arc-swap = "1"
+base64 = "0.22"
 bytes = "1.5"
 chrono = "0.4"
 http = "1.1"
+itertools = "0.13"
 prometheus = "0.13"
 rasn = "0.15"
 rasn-ocsp = "0.15"
@@ -43,6 +47,7 @@ x509-parser = "0.16"
 [dev-dependencies]
 hex-literal = "0.4"
 rustls-pemfile = "2"
+num-bigint = "0.4"
 
 [lib]
 doctest = false

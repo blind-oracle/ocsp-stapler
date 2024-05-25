@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Error};
+use base64::prelude::*;
 use bytes::Bytes;
 use http::{header::CONTENT_TYPE, StatusCode};
 use rasn::types::Oid;
@@ -13,13 +14,17 @@ use sha1::{Digest, Sha1};
 use url::Url;
 use x509_parser::{oid_registry::OID_PKIX_ACCESS_DESCRIPTOR_OCSP, prelude::*};
 
-use super::OcspValidity;
+use super::Validity;
 
 /// OCSP response
 pub struct Response {
+    /// Raw OCSP response body.
+    /// Useful e.g. for stapling
     pub raw: Vec<u8>,
+    /// OCSP response validity interval
+    pub ocsp_validity: Validity,
+    /// Certificate revocation status
     pub cert_status: CertStatus,
-    pub ocsp_validity: OcspValidity,
 }
 
 /// Extracts OCSP responder URL from the given certificate
@@ -133,7 +138,8 @@ impl Client {
         Self { http_client }
     }
 
-    /// Fetches the raw OCSP response for the given certificate chain
+    /// Fetches the raw OCSP response for the given certificate chain.
+    /// Certificates must be DER-encoded.
     pub async fn query_raw(&self, cert: &[u8], issuer: &[u8]) -> Result<OcspResponse, Error> {
         // Prepare OCSP request & URL
         let (ocsp_request, url) =
@@ -144,11 +150,22 @@ impl Client {
             .map_err(|e| anyhow!("unable to serialize OCSP request: {e}"))?;
 
         // Execute HTTP request
-        let response = self
-            .http_client
-            .post(url)
+        // Send using GET if it's <= 255 bytes as required by
+        // https://datatracker.ietf.org/doc/html/rfc5019
+        let request = if ocsp_request.len() <= 255 {
+            // Encode the request as Base64 and append it to the URL
+            let ocsp_request = BASE64_STANDARD.encode(ocsp_request);
+            let url = url
+                .join(&ocsp_request)
+                .context("unable to append base64 request")?;
+
+            self.http_client.get(url)
+        } else {
+            self.http_client.post(url).body(ocsp_request)
+        };
+
+        let response = request
             .header(CONTENT_TYPE, "application/ocsp-request")
-            .body(ocsp_request)
             .send()
             .await
             .context("HTTP request failed")?;
@@ -169,7 +186,8 @@ impl Client {
         Ok(ocsp_response)
     }
 
-    /// Fetches the raw OCSP response and returns its validity & status
+    /// Fetches the raw OCSP response and returns its validity & status.
+    /// Certificates must be DER-encoded.
     pub async fn query(&self, cert: &[u8], issuer: &[u8]) -> Result<Response, Error> {
         let ocsp_response = self
             .query_raw(cert, issuer)
@@ -206,9 +224,9 @@ impl Client {
         Ok(Response {
             raw,
             cert_status: resp.cert_status,
-            ocsp_validity: OcspValidity {
-                this_update: resp.this_update,
-                next_update: resp
+            ocsp_validity: Validity {
+                not_before: resp.this_update,
+                not_after: resp
                     .next_update
                     .ok_or_else(|| anyhow!("No next-update field in the response"))?,
             },

@@ -1,13 +1,14 @@
 use std::{
     collections::BTreeMap,
-    fmt,
+    fmt::{self, Display},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Error};
 use arc_swap::ArcSwapOption;
-use chrono::{DateTime, FixedOffset, TimeDelta, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
+use itertools::Itertools;
 use prometheus::{
     register_histogram_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry, Histogram, IntCounterVec, IntGaugeVec, Registry,
@@ -21,10 +22,10 @@ use rustls::{
 use sha1::{Digest, Sha1};
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::warn;
+use tracing::{info, warn};
 use x509_parser::prelude::*;
 
-use super::{client::Client, OcspValidity};
+use super::{client::Client, Validity, LEEWAY};
 
 type Storage = BTreeMap<Fingerprint, Cert>;
 
@@ -39,15 +40,31 @@ impl From<&CertificateDer<'_>> for Fingerprint {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum RefreshResult {
+    StillValid,
+    Refreshed,
+}
+
 #[derive(Clone)]
 struct Cert {
     ckey: Arc<CertifiedKey>,
-    cert_validity: DateTime<FixedOffset>,
-    ocsp_validity: Option<OcspValidity>,
+    subject: String,
+    status: CertStatus,
+    cert_validity: Validity,
+    ocsp_validity: Option<Validity>,
 }
 
+impl Display for Cert {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.subject)
+    }
+}
+
+#[derive(Clone)]
 struct Metrics {
-    requests_count: IntCounterVec,
+    resolves: IntCounterVec,
+    ocsp_requests: IntCounterVec,
     refresh_duration: Histogram,
     certificate_count: IntGaugeVec,
 }
@@ -55,10 +72,18 @@ struct Metrics {
 impl Metrics {
     fn new(registry: &Registry) -> Self {
         Self {
-            requests_count: register_int_counter_vec_with_registry!(
+            resolves: register_int_counter_vec_with_registry!(
+                format!("ocsp_resolves_total"),
+                format!("Counts the number of certificate resolve requests"),
+                &["stapled"],
+                registry
+            )
+            .unwrap(),
+
+            ocsp_requests: register_int_counter_vec_with_registry!(
                 format!("ocsp_requests_total"),
                 format!("Counts the number of OCSP requests"),
-                &["result"],
+                &["status"],
                 registry
             )
             .unwrap(),
@@ -88,6 +113,7 @@ pub struct Stapler {
     inner: Arc<dyn ResolvesServerCert>,
     tracker: TaskTracker,
     token: CancellationToken,
+    metrics: Option<Metrics>,
 }
 
 impl Stapler {
@@ -111,13 +137,14 @@ impl Stapler {
         let storage = Arc::new(ArcSwapOption::empty());
         let tracker = TaskTracker::new();
         let token = CancellationToken::new();
+        let metrics = registry.map(Metrics::new);
 
         let mut actor = StaplerActor {
             client,
             storage: BTreeMap::new(),
             rx,
             published: storage.clone(),
-            metrics: registry.map(Metrics::new),
+            metrics: metrics.clone(),
         };
 
         // Spawn the background task
@@ -132,6 +159,7 @@ impl Stapler {
             inner,
             tracker,
             token,
+            metrics,
         }
     }
 
@@ -140,6 +168,40 @@ impl Stapler {
         self.token.cancel();
         self.tracker.close();
         self.tracker.wait().await;
+    }
+
+    fn staple(&self, ckey: Arc<CertifiedKey>) -> (Arc<CertifiedKey>, bool) {
+        // Check that we have at least two certificates in the chain.
+        // Otherwise we can't staple it since we need an issuer certificate too.
+        // In this case just return it back unstapled.
+        if ckey.cert.len() < 2 {
+            return (ckey, false);
+        }
+
+        // Compute the fingerprint
+        let fp = Fingerprint::from(&ckey.cert[0]);
+
+        // See if the storage is already published
+        if let Some(map) = self.storage.load_full() {
+            // Check if we have a certificate with this fingerprint
+            if let Some(v) = map.get(&fp) {
+                // Check if its OCSP validity is set
+                // Otherwise it hasn't been yet stapled or OCSP response has expired
+                if v.ocsp_validity.is_some() {
+                    return (v.ckey.clone(), true);
+                }
+
+                // Return unstapled
+                return (ckey, false);
+            }
+        }
+
+        // In some rare cases of very high load the messages can be lost but since they'll be
+        // sent again by subsequent requests - it's not a problem.
+        let _ = self.tx.try_send((fp, ckey.clone()));
+
+        // Return the original unstapled cert
+        (ckey, false)
     }
 }
 
@@ -152,41 +214,58 @@ impl fmt::Debug for Stapler {
 
 impl ResolvesServerCert for Stapler {
     fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
-        // Try to get the cert from the inner resolver
+        // Try to get the cert from the wrapped resolver
         let ckey = self.inner.resolve(client_hello)?;
 
-        // Check that we have at least two certificates in the chain.
-        // Otherwise we can't staple it since we need an issuer certificate too.
-        // In this case just return it back unstapled.
-        if ckey.cert.len() < 2 {
-            return Some(ckey);
+        // Process it through stapler
+        let (ckey, stapled) = self.staple(ckey);
+
+        // Record metrics
+        if let Some(v) = &self.metrics {
+            v.resolves
+                .with_label_values(&[if stapled { "yes" } else { "no" }])
+                .inc();
         }
 
-        // Compute the fingerprint
-        let fp = Fingerprint::from(&ckey.cert[0]);
-
-        // See if the storage has been published
-        if let Some(map) = self.storage.load_full() {
-            // Check if we have a certificate with this fingerprint already
-            if let Some(v) = map.get(&fp) {
-                // Check if its OCSP validity is set
-                // Otherwise it hasn't been yet stapled or OCSP response has expired
-                if v.ocsp_validity.is_some() {
-                    return Some(v.ckey.clone());
-                }
-
-                // Return unstapled
-                return Some(ckey);
-            }
-        }
-
-        // In some rare cases of very high load the messages can be lost but since they'll be
-        // sent again by subsequent requests - it's not a problem.
-        let _ = self.tx.try_send((fp, ckey.clone()));
-
-        // Return the original unstapled cert
         Some(ckey)
     }
+}
+
+async fn refresh_certificate(
+    client: &Client,
+    now: DateTime<FixedOffset>,
+    cert: &mut Cert,
+) -> Result<RefreshResult, Error> {
+    // Check if this OCSP response is still valid
+    if let Some(x) = &cert.ocsp_validity {
+        if !x.time_to_update(now) {
+            return Ok(RefreshResult::StillValid);
+        }
+    }
+
+    // Stapler::resolve() makes sure that we have at least two certificates in the chain
+    let end_entity = cert.ckey.cert[0].as_ref();
+    let issuer = cert.ckey.cert[1].as_ref();
+
+    // Query the OCSP responder
+    let resp = client
+        .query(end_entity, issuer)
+        .await
+        .context("unable to perform OCSP request")?;
+
+    if !resp.ocsp_validity.valid(now) {
+        return Err(anyhow!("the OCSP response is not valid at current time"));
+    }
+
+    // Update the OCSP response on the key
+    let mut ckey = cert.ckey.as_ref().clone();
+    ckey.ocsp = Some(resp.raw);
+
+    // Update values
+    cert.ckey = Arc::new(ckey);
+    cert.status = resp.cert_status;
+
+    Ok(RefreshResult::Refreshed)
 }
 
 struct StaplerActor {
@@ -198,84 +277,59 @@ struct StaplerActor {
 }
 
 impl StaplerActor {
-    async fn refresh(&mut self) {
+    async fn refresh(&mut self, now: DateTime<FixedOffset>) {
         if self.storage.is_empty() {
             return;
         }
 
-        let now: DateTime<FixedOffset> = Utc::now().into();
-
-        // Remove all expired certificates from the storage to free up resources
-        self.storage.retain(|_, v| v.cert_validity > now);
-
         let start = Instant::now();
 
-        let mut revoked = 0;
-        for v in self.storage.values_mut() {
-            if let Some(x) = &v.ocsp_validity {
-                // See if this OCSP response is still valid
-                if !x.time_to_update(now) {
-                    continue;
-                }
+        // Remove all expired certificates from the storage to free up resources
+        self.storage.retain(|_, v| v.cert_validity.valid(now));
 
-                // If the validity is about to expire - clear it
-                // This makes sure we don't serve expired OCSP responses in Stapler::resolve()
-                if x.next_update - now < TimeDelta::hours(1) {
-                    v.ocsp_validity = None
-                }
-            }
+        for cert in self.storage.values_mut() {
+            let r = refresh_certificate(&self.client, now, cert).await;
 
-            // Stapler::resolve() makes sure that we have at least two certificates in the chain
-            let cert = v.ckey.cert[0].as_ref();
-            let issuer = v.ckey.cert[1].as_ref();
-
-            // Query the OCSP responder
-            let resp = self.client.query(cert, issuer).await;
-
-            self.metrics.as_ref().inspect(|x| {
-                x.requests_count
-                    .with_label_values(&[if resp.is_err() { "error" } else { "ok" }])
+            // Record the result
+            if let Some(v) = &self.metrics {
+                v.ocsp_requests
+                    .with_label_values(&[if r.is_err() { "error" } else { "ok" }])
                     .inc()
-            });
-
-            let resp = match resp {
-                Err(e) => {
-                    warn!("OCSP-Stapler: unable to perform OCSP request: {e:#}");
-
-                    continue;
-                }
-
-                Ok(v) => v,
             };
 
-            if let CertStatus::Revoked(x) = resp.cert_status {
-                warn!("OCSP-Stapler: certificate was revoked: {x:?}");
-                revoked += 1;
+            match r {
+                Ok(v) => {
+                    if v == RefreshResult::Refreshed {
+                        info!("OCSP-Stapler: certificate [{cert}] was refreshed");
+                    }
+                }
+                Err(e) => warn!("OCSP-Stapler: unable to refresh certificate [{cert}]: {e:#}"),
             }
 
-            // Update the OCSP response on the key
-            let mut ckey = v.ckey.as_ref().clone();
-            ckey.ocsp = Some(resp.raw);
-
-            // Update values
-            v.ckey = Arc::new(ckey);
-            v.ocsp_validity = Some(resp.ocsp_validity);
+            // If the validity is about to expire for whatever reason - clear it.
+            // This makes sure we don't serve expired OCSP responses in Stapler::resolve()
+            if let Some(v) = &cert.ocsp_validity {
+                if v.not_after - now < LEEWAY {
+                    cert.ocsp_validity = None;
+                }
+            }
         }
 
         // Publish the updated storage version
         let new = Arc::new(self.storage.clone());
         self.published.store(Some(new));
 
-        if let Some(v) = &self.metrics {
-            v.certificate_count
-                .with_label_values(&["ok"])
-                .set(self.storage.len() as i64);
+        // Record some metrics
+        if let Some(m) = &self.metrics {
+            let status = self.storage.values().map(|x| x.status.clone()).counts();
 
-            v.certificate_count
-                .with_label_values(&["revoked"])
-                .set(revoked);
+            for (k, v) in status {
+                m.certificate_count
+                    .with_label_values(&[&format!("{k:?}")])
+                    .set(v as i64);
+            }
 
-            v.refresh_duration.observe(start.elapsed().as_secs_f64());
+            m.refresh_duration.observe(start.elapsed().as_secs_f64());
         }
 
         warn!(
@@ -284,7 +338,7 @@ impl StaplerActor {
         );
     }
 
-    async fn process_certificate(
+    async fn add_certificate(
         &mut self,
         fp: Fingerprint,
         ckey: Arc<CertifiedKey>,
@@ -298,18 +352,23 @@ impl StaplerActor {
             .context("unable to parse certificate as X.509")?
             .1;
 
-        let cert_validity = DateTime::from_timestamp(cert.validity.not_after.timestamp(), 0)
-            .ok_or_else(|| anyhow!("unable to parse NotAfter"))?
-            .into();
+        let cert_validity =
+            Validity::try_from(&cert.validity).context("unable to parse certificate validity")?;
+
+        if !cert_validity.valid(Utc::now().into()) {
+            return Err(anyhow!("The certificate is not valid at current time"));
+        }
 
         let cert = Cert {
             ckey: ckey.clone(),
+            subject: cert.subject.to_string(),
+            status: CertStatus::Unknown(()),
             cert_validity,
             ocsp_validity: None,
         };
 
         self.storage.insert(fp, cert);
-        self.refresh().await;
+        self.refresh(Utc::now().into()).await;
 
         Ok(())
     }
@@ -327,12 +386,12 @@ impl StaplerActor {
                 }
 
                 _ = interval.tick() => {
-                    self.refresh().await;
+                    self.refresh(Utc::now().into()).await;
                 },
 
                 msg = self.rx.recv() => {
                     if let Some((fp, ckey)) = msg {
-                        if let Err(e) = self.process_certificate(fp, ckey).await {
+                        if let Err(e) = self.add_certificate(fp, ckey).await {
                             warn!("OCSP-Stapler: unable to process certificate: {e:#}");
                         }
                     }
