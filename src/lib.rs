@@ -4,6 +4,8 @@
 pub mod client;
 pub mod stapler;
 
+use std::fmt::Display;
+
 pub use client::Client;
 pub use stapler::Stapler;
 
@@ -19,6 +21,12 @@ pub(crate) const LEEWAY: TimeDelta = TimeDelta::minutes(5);
 pub struct Validity {
     pub not_before: DateTime<FixedOffset>,
     pub not_after: DateTime<FixedOffset>,
+}
+
+impl Display for Validity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {}", self.not_before, self.not_after)
+    }
 }
 
 impl TryFrom<&certificate::Validity> for Validity {

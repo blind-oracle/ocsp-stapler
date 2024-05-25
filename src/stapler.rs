@@ -10,8 +10,8 @@ use arc_swap::ArcSwapOption;
 use chrono::{DateTime, FixedOffset, Utc};
 use itertools::Itertools;
 use prometheus::{
-    register_histogram_with_registry, register_int_counter_vec_with_registry,
-    register_int_gauge_vec_with_registry, Histogram, IntCounterVec, IntGaugeVec, Registry,
+    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
 };
 use rasn_ocsp::CertStatus;
 use rustls::{
@@ -65,7 +65,7 @@ impl Display for Cert {
 struct Metrics {
     resolves: IntCounterVec,
     ocsp_requests: IntCounterVec,
-    refresh_duration: Histogram,
+    ocsp_requests_duration: HistogramVec,
     certificate_count: IntGaugeVec,
 }
 
@@ -88,9 +88,10 @@ impl Metrics {
             )
             .unwrap(),
 
-            refresh_duration: register_histogram_with_registry!(
-                format!("ocsp_refresh_duration"),
-                format!("Observes OCSP refresh duration"),
+            ocsp_requests_duration: register_histogram_vec_with_registry!(
+                format!("ocsp_requests_duration"),
+                format!("Observes OCSP requests duration"),
+                &["status"],
                 registry
             )
             .unwrap(),
@@ -264,6 +265,7 @@ async fn refresh_certificate(
     // Update values
     cert.ckey = Arc::new(ckey);
     cert.status = resp.cert_status;
+    cert.ocsp_validity = Some(resp.ocsp_validity);
 
     Ok(RefreshResult::Refreshed)
 }
@@ -282,25 +284,32 @@ impl StaplerActor {
             return;
         }
 
-        let start = Instant::now();
-
         // Remove all expired certificates from the storage to free up resources
         self.storage.retain(|_, v| v.cert_validity.valid(now));
 
         for cert in self.storage.values_mut() {
-            let r = refresh_certificate(&self.client, now, cert).await;
+            let start = Instant::now();
+            let res = refresh_certificate(&self.client, now, cert).await;
 
-            // Record the result
+            // Record metrics
             if let Some(v) = &self.metrics {
-                v.ocsp_requests
-                    .with_label_values(&[if r.is_err() { "error" } else { "ok" }])
-                    .inc()
+                let lbl = &[if res.is_err() { "error" } else { "ok" }];
+
+                v.ocsp_requests_duration
+                    .with_label_values(lbl)
+                    .observe(start.elapsed().as_secs_f64());
+
+                v.ocsp_requests.with_label_values(lbl).inc()
             };
 
-            match r {
+            match res {
                 Ok(v) => {
                     if v == RefreshResult::Refreshed {
-                        info!("OCSP-Stapler: certificate [{cert}] was refreshed");
+                        info!(
+                            "OCSP-Stapler: certificate [{cert}] was refreshed ({}) in {}ms",
+                            cert.ocsp_validity.as_ref().unwrap(),
+                            start.elapsed().as_millis()
+                        );
                     }
                 }
                 Err(e) => warn!("OCSP-Stapler: unable to refresh certificate [{cert}]: {e:#}"),
@@ -310,6 +319,7 @@ impl StaplerActor {
             // This makes sure we don't serve expired OCSP responses in Stapler::resolve()
             if let Some(v) = &cert.ocsp_validity {
                 if v.not_after - now < LEEWAY {
+                    info!("OCSP-Stapler: certificate [{cert}] OCSP response has expired");
                     cert.ocsp_validity = None;
                 }
             }
@@ -328,14 +338,7 @@ impl StaplerActor {
                     .with_label_values(&[&format!("{k:?}")])
                     .set(v as i64);
             }
-
-            m.refresh_duration.observe(start.elapsed().as_secs_f64());
         }
-
-        warn!(
-            "OCSP-Stapler: certificates refreshed in {}ms",
-            start.elapsed().as_millis()
-        );
     }
 
     async fn add_certificate(
