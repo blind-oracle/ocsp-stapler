@@ -355,11 +355,16 @@ impl StaplerActor {
             .context("unable to parse certificate as X.509")?
             .1;
 
-        let cert_validity =
-            Validity::try_from(&cert.validity).context("unable to parse certificate validity")?;
+        let cert_validity = Validity::try_from(&cert.validity).context(format!(
+            "unable to parse certificate [{}] validity",
+            cert.subject
+        ))?;
 
         if !cert_validity.valid(Utc::now().into()) {
-            return Err(anyhow!("The certificate is not valid at current time"));
+            return Err(anyhow!(
+                "the certificate [{}] is not valid at current time",
+                cert.subject
+            ));
         }
 
         let cert = Cert {

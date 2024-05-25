@@ -43,7 +43,7 @@ Other notes:
 
 Stapler supports a few Prometheus metrics - create it using one of `new_..._with_registry()` constructors and provide a Prometheus `Registry` reference to register the metrics in.
 
-# Example
+### Example
 
 ```rust,ignore
 // Inner service that provides certificates to Rustls, can be anything

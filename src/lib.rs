@@ -1,5 +1,6 @@
 #![warn(clippy::all)]
 #![warn(clippy::nursery)]
+#![doc = include_str!(concat!(env!("OUT_DIR"), "/README-rustdocified.md"))]
 
 pub mod client;
 pub mod stapler;

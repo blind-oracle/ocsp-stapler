@@ -1,6 +1,6 @@
 [package]
 name = "ocsp-stapler"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MPL-2.0"
 description = "OCSP stapler & client with support for Rustls"
@@ -15,7 +15,7 @@ categories = [
     "web-programming::http-server",
 ]
 
-readme = "README_CARGO.md"
+readme = "README_DOCS.md"
 
 [dependencies]
 anyhow = "1.0"
@@ -51,3 +51,6 @@ num-bigint = "0.4"
 
 [lib]
 doctest = false
+
+[build-dependencies]
+readme-rustdocifier = "0.1.0"
