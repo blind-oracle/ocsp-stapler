@@ -17,7 +17,7 @@ use x509_parser::certificate;
 /// Allow some time inconsistencies
 pub(crate) const LEEWAY: TimeDelta = TimeDelta::minutes(5);
 
-/// OCSP response validity interval
+/// Generic validity interval for certificates and OCSP responses
 #[derive(Clone, Debug)]
 pub struct Validity {
     pub not_before: DateTime<FixedOffset>,
@@ -50,7 +50,7 @@ impl TryFrom<&certificate::Validity> for Validity {
 
 impl Validity {
     /// Check if we're already past the half of this validity duration
-    pub fn time_to_update(&self, now: DateTime<FixedOffset>) -> bool {
+    pub fn past_half_validity(&self, now: DateTime<FixedOffset>) -> bool {
         now >= self.not_before + ((self.not_after - self.not_before) / 2)
     }
 

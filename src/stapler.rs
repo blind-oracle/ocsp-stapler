@@ -13,7 +13,7 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
 };
-use rasn_ocsp::CertStatus;
+use rasn_ocsp::{CertStatus, OcspResponseStatus};
 use rustls::{
     pki_types::CertificateDer,
     server::{ClientHello, ResolvesServerCert},
@@ -164,6 +164,31 @@ impl Stapler {
         }
     }
 
+    /// Preloads the certificate into the Stapler before the request to resolve() comes.
+    /// This allows e.g. to load certificates with `Must-Staple` extension in a way that
+    /// when the first request comes they're already stapled.
+    /// Has no effect if the same certificate was already preloaded. Silently discards the certificate
+    /// if it's not correct (doens't have the issuer, out of validity window etc)
+    pub fn preload(&self, ckey: Arc<CertifiedKey>) {
+        if ckey.cert.len() < 2 {
+            return;
+        }
+
+        let fp = Fingerprint::from(&ckey.cert[0]);
+        let _ = self.tx.try_send((fp, ckey));
+    }
+
+    /// Returns the certificate revocation status of the provided CertifiedKey.
+    /// It will be None if no successful OCSP request was made.
+    pub fn status(&self, ckey: Arc<CertifiedKey>) -> Option<CertStatus> {
+        if ckey.cert.len() < 2 {
+            return None;
+        }
+
+        let fp = Fingerprint::from(&ckey.cert[0]);
+        Some(self.storage.load_full()?.get(&fp)?.status.clone())
+    }
+
     /// Tells the background worker to stop and waits until it does
     pub async fn stop(&self) {
         self.token.cancel();
@@ -239,7 +264,7 @@ async fn refresh_certificate(
 ) -> Result<RefreshResult, Error> {
     // Check if this OCSP response is still valid
     if let Some(x) = &cert.ocsp_validity {
-        if !x.time_to_update(now) {
+        if !x.past_half_validity(now) {
             return Ok(RefreshResult::StillValid);
         }
     }
