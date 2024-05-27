@@ -13,7 +13,7 @@ use prometheus::{
     register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
 };
-use rasn_ocsp::{CertStatus, OcspResponseStatus};
+use rasn_ocsp::CertStatus;
 use rustls::{
     pki_types::CertificateDer,
     server::{ClientHello, ResolvesServerCert},
@@ -33,9 +33,9 @@ type Storage = BTreeMap<Fingerprint, Cert>;
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct Fingerprint([u8; 20]);
 
-impl From<&CertificateDer<'_>> for Fingerprint {
-    fn from(v: &CertificateDer) -> Self {
-        let digest = Sha1::digest(v.as_ref());
+impl From<&CertifiedKey> for Fingerprint {
+    fn from(v: &CertifiedKey) -> Self {
+        let digest = Sha1::digest(v.cert[0].as_ref());
         Self(digest.into())
     }
 }
@@ -174,7 +174,7 @@ impl Stapler {
             return;
         }
 
-        let fp = Fingerprint::from(&ckey.cert[0]);
+        let fp = Fingerprint::from(ckey.as_ref());
         let _ = self.tx.try_send((fp, ckey));
     }
 
@@ -185,7 +185,7 @@ impl Stapler {
             return None;
         }
 
-        let fp = Fingerprint::from(&ckey.cert[0]);
+        let fp = Fingerprint::from(ckey.as_ref());
         Some(self.storage.load_full()?.get(&fp)?.status.clone())
     }
 
@@ -205,7 +205,7 @@ impl Stapler {
         }
 
         // Compute the fingerprint
-        let fp = Fingerprint::from(&ckey.cert[0]);
+        let fp = Fingerprint::from(ckey.as_ref());
 
         // See if the storage is already published
         if let Some(map) = self.storage.load_full() {
@@ -269,7 +269,7 @@ async fn refresh_certificate(
         }
     }
 
-    // Stapler::resolve() makes sure that we have at least two certificates in the chain
+    // Stapler makes sure that we have at least two certificates in the chain
     let end_entity = cert.ckey.cert[0].as_ref();
     let issuer = cert.ckey.cert[1].as_ref();
 
@@ -366,13 +366,14 @@ impl StaplerActor {
         }
     }
 
-    async fn add_certificate(
+    fn add_certificate(
         &mut self,
         fp: Fingerprint,
         ckey: Arc<CertifiedKey>,
-    ) -> Result<(), Error> {
+        now: DateTime<FixedOffset>,
+    ) -> Result<bool, Error> {
         if self.storage.contains_key(&fp) {
-            return Ok(());
+            return Ok(false);
         }
 
         // Parse the DER-encoded certificate
@@ -385,7 +386,7 @@ impl StaplerActor {
             cert.subject
         ))?;
 
-        if !cert_validity.valid(Utc::now().into()) {
+        if !cert_validity.valid(now) {
             return Err(anyhow!(
                 "the certificate [{}] is not valid at current time",
                 cert.subject
@@ -401,9 +402,7 @@ impl StaplerActor {
         };
 
         self.storage.insert(fp, cert);
-        self.refresh(Utc::now().into()).await;
-
-        Ok(())
+        Ok(true)
     }
 
     async fn run(&mut self, token: CancellationToken) {
@@ -424,12 +423,53 @@ impl StaplerActor {
 
                 msg = self.rx.recv() => {
                     if let Some((fp, ckey)) = msg {
-                        if let Err(e) = self.add_certificate(fp, ckey).await {
+                        let now = Utc::now().into();
+                        if let Err(e) = self.add_certificate(fp, ckey, now) {
                             warn!("OCSP-Stapler: unable to process certificate: {e:#}");
+                        } else {
+                            self.refresh(now).await;
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_add_certificate() {
+        let ckey = crate::client::test::test_ckey();
+        let storage = Arc::new(ArcSwapOption::empty());
+        let (_, rx) = mpsc::channel(1024);
+
+        let mut actor = StaplerActor {
+            client: Client::new(),
+            storage: BTreeMap::new(),
+            rx,
+            published: storage.clone(),
+            metrics: None,
+        };
+
+        let fp = Fingerprint::from(&ckey);
+        let ckey = Arc::new(ckey);
+
+        // Check that invalid certificate date fails
+        let now = DateTime::parse_from_rfc3339("2024-05-25T00:00:00-00:00").unwrap();
+        assert!(actor
+            .add_certificate(fp.clone(), ckey.clone(), now)
+            .is_err());
+
+        // Make sure that both additions succeed and second returns false
+        let now = DateTime::parse_from_rfc3339("2024-05-28T00:00:00-00:00").unwrap();
+        assert!(actor
+            .add_certificate(fp.clone(), ckey.clone(), now)
+            .unwrap());
+        assert!(!actor
+            .add_certificate(fp.clone(), ckey.clone(), now)
+            .unwrap());
     }
 }

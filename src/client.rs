@@ -138,13 +138,7 @@ impl Client {
         Self { http_client }
     }
 
-    /// Fetches the raw OCSP response for the given certificate chain.
-    /// Certificates must be DER-encoded.
-    pub async fn query_raw(&self, cert: &[u8], issuer: &[u8]) -> Result<OcspResponse, Error> {
-        // Prepare OCSP request & URL
-        let (ocsp_request, url) =
-            prepare_ocsp_request(cert, issuer).context("unable to prepare OCSP request")?;
-
+    async fn execute(&self, url: Url, ocsp_request: OcspRequest) -> Result<OcspResponse, Error> {
         // DER-encode it
         let ocsp_request = rasn::der::encode(&ocsp_request)
             .map_err(|e| anyhow!("unable to serialize OCSP request: {e}"))?;
@@ -184,6 +178,16 @@ impl Client {
             .map_err(|e| anyhow!("unable to decode OcspResponse: {e:#}"))?;
 
         Ok(ocsp_response)
+    }
+
+    /// Fetches the raw OCSP response for the given certificate chain.
+    /// Certificates must be DER-encoded.
+    pub async fn query_raw(&self, cert: &[u8], issuer: &[u8]) -> Result<OcspResponse, Error> {
+        // Prepare OCSP request & URL
+        let (ocsp_request, url) =
+            prepare_ocsp_request(cert, issuer).context("unable to prepare OCSP request")?;
+
+        self.execute(url, ocsp_request).await
     }
 
     /// Fetches the raw OCSP response and returns its validity & status.
@@ -235,67 +239,65 @@ impl Client {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::str::FromStr;
 
     use super::*;
-    use hex_literal::hex;
 
-    const CHAIN: &[u8] = b"-----BEGIN CERTIFICATE-----\n\
-    MIIEGzCCAwOgAwIBAgISA6Lvz+ctYY3QxsH2Wtl15VliMA0GCSqGSIb3DQEBCwUA\n\
-    MDIxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQswCQYDVQQD\n\
-    EwJSMzAeFw0yNDA1MjIxODQxNTNaFw0yNDA4MjAxODQxNTJaMBIxEDAOBgNVBAMT\n\
-    B2ljcDIuaW8wWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASQ0Cs7rk/cMH9fVV1w\n\
-    RWDruLIRXFunNbBt1DhEneLJyox1gViQ4PUjdclH4SjBtuM4GEYgsqtfjtVmUEZD\n\
-    LjDno4ICFDCCAhAwDgYDVR0PAQH/BAQDAgeAMB0GA1UdJQQWMBQGCCsGAQUFBwMB\n\
-    BggrBgEFBQcDAjAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBT6I71UZqu4cBfDD/pw\n\
-    s2RrfxFTIzAfBgNVHSMEGDAWgBQULrMXt1hWy65QCUDmH6+dixTCxjBVBggrBgEF\n\
-    BQcBAQRJMEcwIQYIKwYBBQUHMAGGFWh0dHA6Ly9yMy5vLmxlbmNyLm9yZzAiBggr\n\
-    BgEFBQcwAoYWaHR0cDovL3IzLmkubGVuY3Iub3JnLzAdBgNVHREEFjAUggkqLmlj\n\
-    cDIuaW+CB2ljcDIuaW8wEwYDVR0gBAwwCjAIBgZngQwBAgEwggEEBgorBgEEAdZ5\n\
-    AgQCBIH1BIHyAPAAdgA/F0tP1yJHWJQdZRyEvg0S7ZA3fx+FauvBvyiF7PhkbgAA\n\
-    AY+h0wjrAAAEAwBHMEUCIEgf/wjunpqoG09SbIyHc4qDdMiOdAlaQkwJtUcGq85h\n\
-    AiEA+3Sw0q0bayIl+Ax6+VLFWICCnqXUo6xlUvom1v4RAO8AdgB2/4g/Crb7lVHC\n\
-    Ycz1h7o0tKTNuyncaEIKn+ZnTFo6dAAAAY+h0wkvAAAEAwBHMEUCIQCVHm3eG98z\n\
-    H3yULVe5dp/+chkCWHP3DW4rV5RQHh2ChAIgKTv4SRNtvZsCA6/urtZeaaXmTe13\n\
-    +kQW72HPScbzNSEwDQYJKoZIhvcNAQELBQADggEBAJ5jnRYWQrBz0INPtRxQ5GEJ\n\
-    Sfd49/q5ybEnAKFLt1nurOgUBnEa6H3m8J8VGnuRHwHQhEwtNRgMYjkOvdhfU633\n\
-    17hfr3ZizpD3S+ZHgcMeI9uzUg58GLxqD8Gj2bS4jRgjWFxVEJ71KPimRgata0iN\n\
-    A0SMlr2ZwQWgccxv+jLuVbDOvPMmlhKRr9iBSeMKl7goRPl4uIcWJmhXS/8jOcGY\n\
-    KzEI8pX097kn6e2kmHF8KrfH57YrJ2g2/dJ/XZA7SR6UCIFRZL83/J+WjlZKL5hO\n\
-    vABp2wcEodYUslfJHEY8u6uYZNXMyUO1j3xYwWE6W7m0IMRR03xCJdeAV+kAPDA=\n\
-    -----END CERTIFICATE-----\n\
-    -----BEGIN CERTIFICATE-----\n\
-    MIIFFjCCAv6gAwIBAgIRAJErCErPDBinU/bWLiWnX1owDQYJKoZIhvcNAQELBQAw\n\
-    TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh\n\
-    cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMjAwOTA0MDAwMDAw\n\
-    WhcNMjUwOTE1MTYwMDAwWjAyMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNTGV0J3Mg\n\
-    RW5jcnlwdDELMAkGA1UEAxMCUjMwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK\n\
-    AoIBAQC7AhUozPaglNMPEuyNVZLD+ILxmaZ6QoinXSaqtSu5xUyxr45r+XXIo9cP\n\
-    R5QUVTVXjJ6oojkZ9YI8QqlObvU7wy7bjcCwXPNZOOftz2nwWgsbvsCUJCWH+jdx\n\
-    sxPnHKzhm+/b5DtFUkWWqcFTzjTIUu61ru2P3mBw4qVUq7ZtDpelQDRrK9O8Zutm\n\
-    NHz6a4uPVymZ+DAXXbpyb/uBxa3Shlg9F8fnCbvxK/eG3MHacV3URuPMrSXBiLxg\n\
-    Z3Vms/EY96Jc5lP/Ooi2R6X/ExjqmAl3P51T+c8B5fWmcBcUr2Ok/5mzk53cU6cG\n\
-    /kiFHaFpriV1uxPMUgP17VGhi9sVAgMBAAGjggEIMIIBBDAOBgNVHQ8BAf8EBAMC\n\
-    AYYwHQYDVR0lBBYwFAYIKwYBBQUHAwIGCCsGAQUFBwMBMBIGA1UdEwEB/wQIMAYB\n\
-    Af8CAQAwHQYDVR0OBBYEFBQusxe3WFbLrlAJQOYfr52LFMLGMB8GA1UdIwQYMBaA\n\
-    FHm0WeZ7tuXkAXOACIjIGlj26ZtuMDIGCCsGAQUFBwEBBCYwJDAiBggrBgEFBQcw\n\
-    AoYWaHR0cDovL3gxLmkubGVuY3Iub3JnLzAnBgNVHR8EIDAeMBygGqAYhhZodHRw\n\
-    Oi8veDEuYy5sZW5jci5vcmcvMCIGA1UdIAQbMBkwCAYGZ4EMAQIBMA0GCysGAQQB\n\
-    gt8TAQEBMA0GCSqGSIb3DQEBCwUAA4ICAQCFyk5HPqP3hUSFvNVneLKYY611TR6W\n\
-    PTNlclQtgaDqw+34IL9fzLdwALduO/ZelN7kIJ+m74uyA+eitRY8kc607TkC53wl\n\
-    ikfmZW4/RvTZ8M6UK+5UzhK8jCdLuMGYL6KvzXGRSgi3yLgjewQtCPkIVz6D2QQz\n\
-    CkcheAmCJ8MqyJu5zlzyZMjAvnnAT45tRAxekrsu94sQ4egdRCnbWSDtY7kh+BIm\n\
-    lJNXoB1lBMEKIq4QDUOXoRgffuDghje1WrG9ML+Hbisq/yFOGwXD9RiX8F6sw6W4\n\
-    avAuvDszue5L3sz85K+EC4Y/wFVDNvZo4TYXao6Z0f+lQKc0t8DQYzk1OXVu8rp2\n\
-    yJMC6alLbBfODALZvYH7n7do1AZls4I9d1P4jnkDrQoxB3UqQ9hVl3LEKQ73xF1O\n\
-    yK5GhDDX8oVfGKF5u+decIsH4YaTw7mP3GFxJSqv3+0lUFJoi5Lc5da149p90Ids\n\
-    hCExroL1+7mryIkXPeFM5TgO9r0rvZaBFOvV2z0gp35Z0+L4WPlbuEjN/lxPFin+\n\
-    HlUjr8gRsI3qfJOQFy/9rKIJR0Y/8Omwt/8oTWgy1mdeHmmjk7j1nYsvC9JSQ6Zv\n\
-    MldlTTKB3zhThV1+XWYp6rjd5JW1zbVWEkLNxE7GJThEUG3szgBVGP7pSWTUTsqX\n\
-    nLRbwHOoq7hHwg==\n\
-    -----END CERTIFICATE-----\n\
-    ";
+    use hex_literal::hex;
+    use httptest::{matchers::*, responders::*, Expectation, Server};
+    use rustls::{crypto::aws_lc_rs, sign::CertifiedKey};
+
+    const OCSP_REQUEST: &[u8] = include_bytes!("../test/ocsp_request.bin");
+    const OCSP_RESPONSE: &[u8] = include_bytes!("../test/ocsp_response.bin");
+    const CHAIN: &[u8] = include_bytes!("../test/chain.pem");
+    const KEY: &[u8] = include_bytes!("../test/key.pem");
+
+    fn test_request() -> OcspRequest {
+        OcspRequest {
+            tbs_request: TbsRequest {
+                version: Version::ZERO,
+                requestor_name: None,
+                request_list: vec![Request {
+                    req_cert: CertId {
+                        hash_algorithm: AlgorithmIdentifier {
+                            algorithm: Oid::ISO_IDENTIFIED_ORGANISATION_OIW_SECSIG_ALGORITHM_SHA1
+                                .to_owned(),
+                            parameters: None,
+                        },
+                        issuer_name_hash: Bytes::from(
+                            &hex!("36175FAA02C887BDD95CA13549512D1E97FADFA9")[..],
+                        ),
+                        issuer_key_hash: Bytes::from(
+                            &hex!("6691287B8D8654BAF6203197AEC491E9AFB70BCB")[..],
+                        ),
+                        serial_number: num_bigint::BigInt::from_str(
+                            "3819096869935823013274658159093914787918510",
+                        )
+                        .unwrap(),
+                    },
+                    single_request_extensions: None,
+                }],
+                request_extensions: None,
+            },
+            optional_signature: None,
+        }
+    }
+
+    pub(crate) fn test_ckey() -> CertifiedKey {
+        let certs = CHAIN.to_vec();
+        let certs = rustls_pemfile::certs(&mut certs.as_ref())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let key = KEY.to_vec();
+        let key = rustls_pemfile::private_key(&mut key.as_ref())
+            .unwrap()
+            .unwrap();
+
+        let key = aws_lc_rs::sign::any_supported_type(&key).unwrap();
+        CertifiedKey::new(certs, key)
+    }
 
     #[test]
     fn test_extract_url() {
@@ -308,7 +310,7 @@ mod test {
 
         assert_eq!(
             extract_ocsp_url(&cert),
-            Some("http://r3.o.lencr.org".to_string())
+            Some("http://stg-e5.o.lencr.org".to_string())
         )
     }
 
@@ -319,39 +321,28 @@ mod test {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        let (req, url) = prepare_ocsp_request(&certs[0], &certs[1]).unwrap();
+        let (ocsp_request, url) = prepare_ocsp_request(&certs[0], &certs[1]).unwrap();
 
-        assert_eq!(url.to_string(), "http://r3.o.lencr.org/");
+        assert_eq!(url.to_string(), "http://stg-e5.o.lencr.org/");
+        assert_eq!(ocsp_request, test_request());
+        assert_eq!(rasn::der::encode(&ocsp_request).unwrap(), OCSP_REQUEST);
+    }
 
-        let expected = OcspRequest {
-            tbs_request: TbsRequest {
-                version: Version::ZERO,
-                requestor_name: None,
-                request_list: vec![Request {
-                    req_cert: CertId {
-                        hash_algorithm: AlgorithmIdentifier {
-                            algorithm: Oid::ISO_IDENTIFIED_ORGANISATION_OIW_SECSIG_ALGORITHM_SHA1
-                                .to_owned(),
-                            parameters: None,
-                        },
-                        issuer_name_hash: Bytes::from(
-                            &hex!("48DAC9A0FB2BD32D4FF0DE68D2F567B735F9B3C4")[..],
-                        ),
-                        issuer_key_hash: Bytes::from(
-                            &hex!("142EB317B75856CBAE500940E61FAF9D8B14C2C6")[..],
-                        ),
-                        serial_number: num_bigint::BigInt::from_str(
-                            "316781366221747159870971160091460368685410",
-                        )
-                        .unwrap(),
-                    },
-                    single_request_extensions: None,
-                }],
-                request_extensions: None,
-            },
-            optional_signature: None,
-        };
+    #[tokio::test]
+    async fn test_execute() {
+        let server = Server::run();
 
-        assert_eq!(req, expected);
+        server.expect(
+            Expectation::matching(request::method("GET"))
+                .respond_with(status_code(200).body(OCSP_RESPONSE)),
+        );
+
+        let client = Client::new();
+        let ocsp_response = client
+            .execute(Url::parse(&server.url_str("/")).unwrap(), test_request())
+            .await
+            .unwrap();
+
+        assert_eq!(OCSP_RESPONSE, rasn::der::encode(&ocsp_response).unwrap());
     }
 }

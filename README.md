@@ -20,9 +20,9 @@ let certs = rustls_pemfile::certs(&mut certs.as_ref()).collect::<Result<Vec<_>, 
 
 let key = std::fs::read("private.pem").unwrap();
 let key = rustls_pemfile::private_key(&mut key.as_ref()).unwrap();
-let key = aws_lc_rs::sign::any_supported_type(&key).unwrap();
+let key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).unwrap();
 
-let ckey = CertifiedKey::new(certs, key);
+let ckey = rustls::sign::CertifiedKey::new(certs, key);
 
 // Inner service that provides certificates to Rustls, can be anything
 let mut inner = rustls::server::ResolvesServerCertUsingSni::new();

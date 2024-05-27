@@ -48,6 +48,7 @@ x509-parser = "0.16"
 hex-literal = "0.4"
 rustls-pemfile = "2"
 num-bigint = "0.4"
+httptest = "0.16"
 
 [lib]
 doctest = false
