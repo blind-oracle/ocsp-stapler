@@ -15,7 +15,6 @@ use prometheus::{
 };
 use rasn_ocsp::CertStatus;
 use rustls::{
-    pki_types::CertificateDer,
     server::{ClientHello, ResolvesServerCert},
     sign::CertifiedKey,
 };
