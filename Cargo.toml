@@ -1,6 +1,6 @@
 [package]
 name = "ocsp-stapler"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license = "MPL-2.0"
 description = "OCSP stapler & client with support for Rustls"
@@ -36,7 +36,10 @@ reqwest = { version = "0.12", default_features = false, features = [
     "charset",
     "macos-system-configuration",
 ] }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "ring",
+] }
 sha1 = "0.10"
 tokio = { version = "1.36", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
