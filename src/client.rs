@@ -246,7 +246,7 @@ pub(crate) mod test {
 
     use hex_literal::hex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
-    use rustls::{crypto::aws_lc_rs, sign::CertifiedKey};
+    use rustls::{crypto::ring, sign::CertifiedKey};
 
     const OCSP_REQUEST: &[u8] = include_bytes!("../test/ocsp_request.bin");
     const OCSP_RESPONSE: &[u8] = include_bytes!("../test/ocsp_response.bin");
@@ -295,7 +295,7 @@ pub(crate) mod test {
             .unwrap()
             .unwrap();
 
-        let key = aws_lc_rs::sign::any_supported_type(&key).unwrap();
+        let key = ring::sign::any_supported_type(&key).unwrap();
         CertifiedKey::new(certs, key)
     }
 
