@@ -20,7 +20,7 @@ let certs = rustls_pemfile::certs(&mut certs.as_ref()).collect::<Result<Vec<_>, 
 
 let key = std::fs::read("private.pem").unwrap();
 let key = rustls_pemfile::private_key(&mut key.as_ref()).unwrap();
-let key = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).unwrap();
+let key = rustls::crypto::ring::sign::any_supported_type(&key).unwrap();
 
 let ckey = rustls::sign::CertifiedKey::new(certs, key);
 
