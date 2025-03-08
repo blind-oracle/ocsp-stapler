@@ -24,8 +24,8 @@ base64 = "0.22"
 bytes = "1.5"
 chrono = "0.4"
 http = "1.1"
-itertools = "0.13"
-prometheus = "0.13"
+itertools = { version = "0.13", optional = true }
+prometheus = { version = "0.13", optional = true }
 rasn = "0.15"
 rasn-ocsp = "0.15"
 rasn-pkix = "0.15"
@@ -55,6 +55,10 @@ httptest = "0.16"
 
 [lib]
 doctest = false
+
+[features]
+default = ["prometheus"]
+prometheus = ["itertools", "dep:prometheus"]
 
 [build-dependencies]
 readme-rustdocifier = "0.1.0"
