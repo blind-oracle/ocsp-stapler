@@ -41,7 +41,7 @@ Other notes:
 
 ### Metrics
 
-Stapler supports a few Prometheus metrics - create it using one of `new_..._with_registry()` constructors and provide a Prometheus [`Registry`](prometheus::Registry) reference to register the metrics in.
+Stapler supports a few Prometheus metrics - enable the `prometheus` feature (it is enabled by default), create it using one of `new_..._with_registry()` constructors and provide a Prometheus [`Registry`](prometheus::Registry) reference to register the metrics in.
 
 ### Example
 

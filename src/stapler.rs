@@ -8,11 +8,6 @@ use std::{
 use anyhow::{anyhow, Context, Error};
 use arc_swap::ArcSwapOption;
 use chrono::{DateTime, FixedOffset, Utc};
-use itertools::Itertools;
-use prometheus::{
-    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
-    register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
-};
 use rasn_ocsp::CertStatus;
 use rustls::{
     server::{ClientHello, ResolvesServerCert},
@@ -23,6 +18,15 @@ use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{info, warn};
 use x509_parser::prelude::*;
+
+#[cfg(feature = "prometheus")]
+use prometheus::{
+    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
+    register_int_gauge_vec_with_registry, HistogramVec, IntCounterVec, IntGaugeVec, Registry,
+};
+
+#[cfg(feature = "prometheus")]
+use itertools::Itertools;
 
 use super::{client::Client, Validity, LEEWAY};
 
@@ -60,6 +64,7 @@ impl Display for Cert {
     }
 }
 
+#[cfg(feature = "prometheus")]
 #[derive(Clone)]
 struct Metrics {
     resolves: IntCounterVec,
@@ -68,6 +73,7 @@ struct Metrics {
     certificate_count: IntGaugeVec,
 }
 
+#[cfg(feature = "prometheus")]
 impl Metrics {
     fn new(registry: &Registry) -> Self {
         Self {
@@ -113,21 +119,31 @@ pub struct Stapler {
     inner: Arc<dyn ResolvesServerCert>,
     tracker: TaskTracker,
     token: CancellationToken,
+    #[cfg(feature = "prometheus")]
     metrics: Option<Metrics>,
 }
 
 impl Stapler {
     /// Creates a Stapler with a default OCSP Client and no metrics
+    #[cfg(feature = "prometheus")]
     pub fn new(inner: Arc<dyn ResolvesServerCert>) -> Self {
         Self::new_with_client_and_registry(inner, Client::new(), None)
     }
 
     /// Creates a Stapler with a default OCSP Client and Registry
+    #[cfg(feature = "prometheus")]
     pub fn new_with_registry(inner: Arc<dyn ResolvesServerCert>, registry: &Registry) -> Self {
         Self::new_with_client_and_registry(inner, Client::new(), Some(registry))
     }
 
+    /// Creates a Stapler with a provided OCSP Client and no metrics
+    #[cfg(feature = "prometheus")]
+    pub fn new_with_client(inner: Arc<dyn ResolvesServerCert>, client: Client) -> Self {
+        Self::new_with_client_and_registry(inner, client, None)
+    }
+
     /// Creates a Stapler with a provided OCSP Client and Registry
+    #[cfg(feature = "prometheus")]
     pub fn new_with_client_and_registry(
         inner: Arc<dyn ResolvesServerCert>,
         client: Client,
@@ -160,6 +176,45 @@ impl Stapler {
             tracker,
             token,
             metrics,
+        }
+    }
+
+    /// Creates a Stapler with a default OCSP Client and no metrics
+    #[cfg(not(feature = "prometheus"))]
+    pub fn new(inner: Arc<dyn ResolvesServerCert>) -> Self {
+        Self::new_with_client(inner, Client::new())
+    }
+
+    /// Creates a Stapler with a default OCSP Client and no metrics (without Prometheus support)
+    #[cfg(not(feature = "prometheus"))]
+    pub fn new_with_client(
+        inner: Arc<dyn ResolvesServerCert>,
+        client: Client,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(1024);
+        let storage = Arc::new(ArcSwapOption::empty());
+        let tracker = TaskTracker::new();
+        let token = CancellationToken::new();
+
+        let mut actor = StaplerActor {
+            client,
+            storage: BTreeMap::new(),
+            rx,
+            published: storage.clone()
+        };
+
+        // Spawn the background task
+        let actor_token = token.clone();
+        tracker.spawn(async move {
+            actor.run(actor_token).await;
+        });
+
+        Self {
+            tx,
+            storage,
+            inner,
+            tracker,
+            token
         }
     }
 
@@ -243,9 +298,14 @@ impl ResolvesServerCert for Stapler {
         let ckey = self.inner.resolve(client_hello)?;
 
         // Process it through stapler
+        #[cfg(feature = "prometheus")]
         let (ckey, stapled) = self.staple(ckey);
 
+        #[cfg(not(feature = "prometheus"))]
+        let (ckey, _stapled) = self.staple(ckey);
+
         // Record metrics
+        #[cfg(feature = "prometheus")]
         if let Some(v) = &self.metrics {
             v.resolves
                 .with_label_values(&[if stapled { "yes" } else { "no" }])
@@ -299,6 +359,7 @@ struct StaplerActor {
     storage: Storage,
     rx: mpsc::Receiver<(Fingerprint, Arc<CertifiedKey>)>,
     published: Arc<ArcSwapOption<Storage>>,
+    #[cfg(feature = "prometheus")]
     metrics: Option<Metrics>,
 }
 
@@ -316,6 +377,7 @@ impl StaplerActor {
             let res = refresh_certificate(&self.client, now, cert).await;
 
             // Record metrics
+            #[cfg(feature = "prometheus")]
             if let Some(v) = &self.metrics {
                 let lbl = &[if res.is_err() { "error" } else { "ok" }];
 
@@ -354,6 +416,7 @@ impl StaplerActor {
         self.published.store(Some(new));
 
         // Record some metrics
+        #[cfg(feature = "prometheus")]
         if let Some(m) = &self.metrics {
             let status = self.storage.values().map(|x| x.status.clone()).counts();
 
