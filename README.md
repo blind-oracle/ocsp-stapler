@@ -1,3 +1,8 @@
+# Warning
+
+Be advised that LetsEncrypt, sadly, [decided to drop support](https://letsencrypt.org/2024/12/05/ending-ocsp/) for OCSP stapling in 2025.
+So if you were planning to use this crate with LetsEncrypt - soon it won't be possible.
+
 # ocsp-stapler
 
 [![crates.io](https://img.shields.io/crates/v/ocsp-stapler.svg)](https://crates.io/crates/ocsp-stapler)
