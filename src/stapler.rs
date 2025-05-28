@@ -187,10 +187,7 @@ impl Stapler {
 
     /// Creates a Stapler with a default OCSP Client and no metrics (without Prometheus support)
     #[cfg(not(feature = "prometheus"))]
-    pub fn new_with_client(
-        inner: Arc<dyn ResolvesServerCert>,
-        client: Client,
-    ) -> Self {
+    pub fn new_with_client(inner: Arc<dyn ResolvesServerCert>, client: Client) -> Self {
         let (tx, rx) = mpsc::channel(1024);
         let storage = Arc::new(ArcSwapOption::empty());
         let tracker = TaskTracker::new();
@@ -200,7 +197,7 @@ impl Stapler {
             client,
             storage: BTreeMap::new(),
             rx,
-            published: storage.clone()
+            published: storage.clone(),
         };
 
         // Spawn the background task
@@ -214,7 +211,7 @@ impl Stapler {
             storage,
             inner,
             tracker,
-            token
+            token,
         }
     }
 
@@ -501,9 +498,15 @@ impl StaplerActor {
 #[cfg(test)]
 mod test {
     use super::*;
+    use rustls::crypto::ring;
 
     #[tokio::test]
     async fn test_add_certificate() {
+        // Install a cryptography provider, otherwise the OCSP stapler would panic
+        ring::default_provider()
+            .install_default()
+            .unwrap_or_default();
+
         let ckey = crate::client::test::test_ckey();
         let storage = Arc::new(ArcSwapOption::empty());
         let (_, rx) = mpsc::channel(1024);

@@ -330,6 +330,11 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn test_execute() {
+        // Install a cryptography provider, otherwise the OCSP stapler would panic
+        ring::default_provider()
+            .install_default()
+            .unwrap_or_default();
+
         let server = Server::run();
 
         server.expect(

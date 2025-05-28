@@ -30,8 +30,7 @@ rasn = "0.15"
 rasn-ocsp = "0.15"
 rasn-pkix = "0.15"
 reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
-    "rustls-tls-webpki-roots",
+    "rustls-tls-webpki-roots-no-provider",
     "http2",
     "charset",
     "macos-system-configuration",
