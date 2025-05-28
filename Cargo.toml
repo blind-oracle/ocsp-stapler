@@ -29,17 +29,13 @@ prometheus = { version = "0.14", optional = true }
 rasn = "0.15"
 rasn-ocsp = "0.15"
 rasn-pkix = "0.15"
-reqwest = { version = "0.12", default_features = false, features = [
-    "rustls-tls",
-    "rustls-tls-webpki-roots",
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots-no-provider",
     "http2",
     "charset",
     "macos-system-configuration",
 ] }
-rustls = { version = "0.23", default-features = false, features = [
-    "std",
-    "ring",
-] }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
 sha1 = "0.10"
 tokio = { version = "1.44", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
@@ -57,8 +53,10 @@ httptest = "0.16"
 doctest = false
 
 [features]
-default = ["prometheus"]
+default = ["prometheus", "ring"]
+aws-lc-rs = ["rustls/aws_lc_rs"]
 prometheus = ["itertools", "dep:prometheus"]
+ring = ["rustls/ring"]
 
 [build-dependencies]
 readme-rustdocifier = "0.1.0"
