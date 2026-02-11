@@ -488,6 +488,11 @@ impl StaplerActor {
                         } else {
                             self.refresh(now).await;
                         }
+                    } else {
+                        // The OCSP stapler struct is dropped, but the task is still running...
+                        // So interrupt the task.
+                        warn!("OCSP-Stapler: stapler dropped, exiting");
+                        return;
                     }
                 }
             }
